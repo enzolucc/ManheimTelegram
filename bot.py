@@ -2,6 +2,11 @@ import os
 import logging
 import requests
 import json
+import io
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -141,26 +146,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Basic: `/vin 1HGCM82633A123456`\n"
         "• With subseries: `/vin 1HGCM82633A123456 SE`\n"
         "• With subseries & transmission: `/vin 1HGCM82633A123456 SE AUTO`\n"
-        "• Advanced: `/vin WBA3C1C5XFP853102 color=WHITE grade=3.5 odometer=20000 region=NE`\n\n"
+        "• Advanced: `/vin WBA3C1C5XFP853102 color=WHITE grade=3.5 odometer=20000 region=NE`\n"
+        "• Historical: `/vin 1HGCM82633A123456 date=2023-10-15`\n\n"
         
         "*Parameter Options:*\n"
         "• `color` - WHITE, BLACK, SILVER, etc.\n"
         "• `grade` - 1.0 to 5.0 (condition grade)\n"
         "• `odometer` - Mileage in miles\n"
-        "• `region` - NE, SE, MW, SW, W\n\n"
+        "• `region` - NE, SE, MW, SW, W\n"
+        "• `date` - YYYY-MM-DD format (historical valuation)\n\n"
         
         "*Year/Make/Model Lookup:*\n"
-        "• `/ymm 2020 Honda Accord`\n\n"
+        "• `/ymm 2020 Honda Accord`\n"
+        "• With date: `/ymm 2020 Honda Accord date=2023-05-01`\n\n"
         
         "*History and Previous Lookups:*\n"
         "• `/history` - View your 10 most recent lookups\n"
         "• `/history VIN` - View only VIN lookups\n"
         "• `/history YMM` - View only Year/Make/Model lookups\n\n"
         
+        "*Interactive Features:*\n"
+        "• 📈 *Price Trend Charts* - Generate visual price trends for any vehicle\n"
+        "• 🔍 *Transaction Filtering* - Filter auction data by grade, mileage, and date\n"
+        "• 📄 *Pagination* - Navigate through large data sets with page controls\n\n"
+        
         "*Testing Example:*\n"
         "• Test VIN (UAT): `WBA3C1C5XFP853102`\n\n"
         
-        "💡 After a search, use the interactive 'Refine Valuation' button to adjust parameters with a user-friendly interface.",
+        "💡 After a search, use the interactive 'Refine Valuation' button to adjust parameters with a user-friendly interface.\n"
+        "💡 Date lookups show how vehicle values change over time. Dates must be after 2018-10-08.",
         parse_mode="Markdown"
     )
 
@@ -202,6 +216,7 @@ def get_vin_valuation(vin, subseries=None, transmission=None, **query_params):
             - grade (float/str): Vehicle condition grade (e.g., "3.5", "4.0")
             - odometer (int): Vehicle mileage
             - region (str): Geographic region (e.g., "NE", "SE", "MW", "SW", "W")
+            - date (str): Date for historical valuation (YYYY-MM-DD format)
     
     Returns:
         dict: Valuation data or None if not found/error
@@ -217,16 +232,66 @@ def get_vin_valuation(vin, subseries=None, transmission=None, **query_params):
     if "region" in query_params and query_params["region"] not in valid_regions:
         logger.warning(f"Invalid region: {query_params['region']}. Must be one of {valid_regions}")
         query_params["region"] = None
+        
+    # Validate date parameter
+    if "date" in query_params:
+        date_str = query_params["date"]
+        try:
+            # Check if date is in correct format
+            datetime.strptime(date_str, "%Y-%m-%d")
+            
+            # Check if date is after minimum allowed date (2018-10-08)
+            min_date = datetime.strptime("2018-10-08", "%Y-%m-%d")
+            requested_date = datetime.strptime(date_str, "%Y-%m-%d")
+            
+            if requested_date < min_date:
+                logger.warning(f"Date too early: {date_str}. Must be on or after 2018-10-08")
+                query_params["date"] = None
+                
+            # Check if date is in the future
+            today = datetime.now()
+            if requested_date > today:
+                logger.warning(f"Future date: {date_str}. Must be on or before today's date")
+                query_params["date"] = None
+                
+        except ValueError:
+            logger.warning(f"Invalid date format: {date_str}. Must be in YYYY-MM-DD format")
+            query_params["date"] = None
     
     if "grade" in query_params:
         try:
-            # Ensure grade is a float between 0 and 5
-            grade = float(query_params["grade"])
-            if not 0 <= grade <= 5:
-                logger.warning(f"Grade out of range: {grade}. Must be between 0 and 5")
-                query_params["grade"] = None
+            grade_value = query_params["grade"]
+            
+            # Handle different grade formats
+            if isinstance(grade_value, (int, float)):
+                # If already a number, check if it's using the API format (10-50) or decimal format (1.0-5.0)
+                if grade_value > 5 and grade_value <= 50:
+                    # Already in API format (10-50)
+                    if not 10 <= grade_value <= 50:
+                        logger.warning(f"Grade out of range: {grade_value}. Must be between 10 and 50")
+                        query_params["grade"] = None
+                else:
+                    # In decimal format (1.0-5.0), convert to API format (10-50)
+                    if not 0 <= grade_value <= 5:
+                        logger.warning(f"Grade out of range: {grade_value}. Must be between 0 and 5")
+                        query_params["grade"] = None
+                    else:
+                        # Convert to API integer format
+                        query_params["grade"] = int(grade_value * 10)
             else:
-                query_params["grade"] = grade
+                # Try to convert string to number
+                float_grade = float(grade_value)
+                if float_grade > 5 and float_grade <= 50:
+                    # Already in API format (10-50)
+                    query_params["grade"] = int(float_grade)
+                else:
+                    # Convert from decimal (1.0-5.0) to API format (10-50)
+                    if 0 <= float_grade <= 5:
+                        query_params["grade"] = int(float_grade * 10)
+                    else:
+                        logger.warning(f"Grade out of range: {float_grade}. Must be between 0 and 5")
+                        query_params["grade"] = None
+                        
         except (ValueError, TypeError):
             logger.warning(f"Invalid grade value: {query_params['grade']}")
             query_params["grade"] = None
@@ -325,7 +390,8 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "*Examples:*\n"
             "• `/vin 1HGCM82633A123456`\n"
             "• `/vin 1HGCM82633A123456 SE`\n"
-            "• `/vin WBA3C1C5XFP853102 color=WHITE grade=3.5 odometer=20000`\n\n"
+            "• `/vin WBA3C1C5XFP853102 color=WHITE grade=3.5 odometer=20000`\n"
+            "• `/vin 1HGCM82633A123456 date=2023-05-15`\n\n"
             "Type `/help` for more details and options.",
             parse_mode="Markdown"
         )
@@ -365,16 +431,48 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     
                 elif key == 'grade':
                     try:
-                        value = float(value)
-                        if not 0 <= value <= 5:
+                        float_value = float(value)
+                        if not 0 <= float_value <= 5:
                             await update.message.reply_text(
                                 f"⚠️ *Warning*: Grade must be between 0 and 5. Using default value.",
                                 parse_mode="Markdown"
                             )
                             continue
+                        # Convert decimal grade (e.g., 3.5) to integer format (e.g., 35) for API
+                        value = int(float_value * 10)
                     except ValueError:
                         await update.message.reply_text(
                             f"⚠️ *Warning*: Invalid grade '{value}'. Must be a number between 0 and 5. Using default value.",
+                            parse_mode="Markdown"
+                        )
+                        continue
+                        
+                elif key == 'date':
+                    # Validate date format (YYYY-MM-DD)
+                    try:
+                        # Parse date to validate format
+                        requested_date = datetime.strptime(value, "%Y-%m-%d")
+                        
+                        # Check if date is after minimum allowed date (2018-10-08)
+                        min_date = datetime.strptime("2018-10-08", "%Y-%m-%d")
+                        if requested_date < min_date:
+                            await update.message.reply_text(
+                                f"⚠️ *Warning*: Date must be on or after 2018-10-08. Using current date.",
+                                parse_mode="Markdown"
+                            )
+                            continue
+                            
+                        # Check if date is in the future
+                        if requested_date > datetime.now():
+                            await update.message.reply_text(
+                                f"⚠️ *Warning*: Date cannot be in the future. Using current date.",
+                                parse_mode="Markdown"
+                            )
+                            continue
+                            
+                    except ValueError:
+                        await update.message.reply_text(
+                            f"⚠️ *Warning*: Invalid date format '{value}'. Must be in YYYY-MM-DD format. Using current date.",
                             parse_mode="Markdown"
                         )
                         continue
@@ -440,9 +538,52 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"❌ *No auction data found for VIN:* `{vin}`", parse_mode="Markdown")
             return
             
-        # Format and send the response
-        message = format_auction_data(data)
-        await update.message.reply_text(message, parse_mode="Markdown")
+        # Format and send the response with potential pagination
+        MAX_MESSAGE_LENGTH = 4000  # Slightly less than Telegram's limit to accommodate markdown
+        formatted_data = format_auction_data(data)
+        
+        # Check if we need pagination based on message length
+        if len(formatted_data["message"]) > MAX_MESSAGE_LENGTH:
+            # First message with pagination details
+            await update.message.reply_text(
+                f"📊 *Auction data for VIN:* `{vin}` (1/{formatted_data['total_pages']})",
+                parse_mode="Markdown"
+            )
+            
+            # Send paged messages
+            for page in range(1, formatted_data['total_pages'] + 1):
+                page_data = format_auction_data(data, MAX_MESSAGE_LENGTH, page)
+                
+                # Create pagination controls if needed
+                if page_data['total_pages'] > 1:
+                    # Add pagination controls as inline keyboard
+                    keyboard = []
+                    pagination_row = []
+                    
+                    if page > 1:
+                        pagination_row.append(InlineKeyboardButton("« Prev", callback_data=f"page:{vin}:{page-1}"))
+                    
+                    pagination_row.append(InlineKeyboardButton(f"{page}/{page_data['total_pages']}", callback_data="noop"))
+                    
+                    if page < page_data['total_pages']:
+                        pagination_row.append(InlineKeyboardButton("Next »", callback_data=f"page:{vin}:{page+1}"))
+                    
+                    keyboard.append(pagination_row)
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await update.message.reply_text(
+                        page_data['message'],
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await update.message.reply_text(
+                        page_data['message'],
+                        parse_mode="Markdown"
+                    )
+        else:
+            # No pagination needed, send as one message
+            await update.message.reply_text(formatted_data["message"], parse_mode="Markdown")
         
         # Store data for potential refinement and transaction viewing
         user_id = update.effective_user.id
@@ -459,7 +600,7 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             history_cache[user_id] = []
             
         # Add the new lookup to the start of the list (most recent first)
-        history_cache[user_id].insert(0, {
+        history_entry = {
             'type': 'vin',
             'query': {
                 'vin': vin,
@@ -469,7 +610,13 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             },
             'data': data,
             'timestamp': datetime.now()
-        })
+        }
+        
+        # Add special flag if this is a historical lookup
+        if 'date' in query_params:
+            history_entry['historical'] = True
+            
+        history_cache[user_id].insert(0, history_entry)
         
         # Keep only the 10 most recent lookups
         if len(history_cache[user_id]) > 10:
@@ -490,6 +637,36 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboard.append([InlineKeyboardButton(
                 f"📋 View All {transaction_count} Transactions", 
                 callback_data="view_all_transactions"
+            )])
+            
+            # Add quick filters if there are enough transactions
+            if transaction_count >= 10:
+                # Add "Recent Transactions" button - last 6 months
+                six_months_ago = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                keyboard.append([InlineKeyboardButton(
+                    "🕒 Last 6 Months Only", 
+                    callback_data=f"view_all_transactions:date:{six_months_ago}"
+                )])
+                
+                # Add "High Grade Only" button
+                keyboard.append([InlineKeyboardButton(
+                    "🌟 Grade 4.0+ Only", 
+                    callback_data="view_all_transactions:grade:4.0"
+                )])
+        
+        # Add price trend chart option if there are historical transactions or historical data
+        has_historical_data = (
+            "historicalAverages" in data and 
+            (("last30days" in data["historicalAverages"] and "price" in data["historicalAverages"]["last30days"]) or
+             ("lastMonth" in data["historicalAverages"] and "price" in data["historicalAverages"]["lastMonth"]) or
+             ("lastSixMonths" in data["historicalAverages"] and "price" in data["historicalAverages"]["lastSixMonths"]) or
+             ("lastYear" in data["historicalAverages"] and "price" in data["historicalAverages"]["lastYear"]))
+        )
+        
+        if has_historical_data or (has_transactions and transaction_count >= 3):
+            keyboard.append([InlineKeyboardButton(
+                "📈 Generate Price Trend Chart", 
+                callback_data=f"generate_chart:{vin}"
             )])
         
         # Add refinement option if no color or grade were provided
@@ -721,7 +898,7 @@ async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 async def view_all_transactions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display all transactions for a VIN."""
+    """Display all transactions for a VIN with filtering options."""
     query = update.callback_query
     await query.answer()
     
@@ -753,10 +930,89 @@ async def view_all_transactions_callback(update: Update, context: ContextTypes.D
     
     transactions = data["marketSummary"]["transactions"]
     
-    # Create a detailed message with all transactions
-    message = f"📋 *All Transactions for VIN:* `{vin}`\n\n"
+    # Check for transaction filters in callback data (format: "view_all_transactions:filter_type:value")
+    filter_parts = query.data.split(':')
+    filter_type = filter_parts[1] if len(filter_parts) > 1 else None
+    filter_value = filter_parts[2] if len(filter_parts) > 2 else None
     
-    for i, tx in enumerate(transactions, 1):
+    # Apply filters if provided
+    filtered_transactions = transactions
+    filter_description = ""
+    
+    if filter_type and filter_value:
+        if filter_type == "grade":
+            # Convert grade filter to match API format
+            min_grade = float(filter_value)
+            filter_description = f"(Grade ≥ {filter_value})"
+            filtered_transactions = [
+                tx for tx in transactions 
+                if "conditionGrade" in tx and 
+                (float(tx["conditionGrade"]) / 10 if float(tx["conditionGrade"]) > 5 else float(tx["conditionGrade"])) >= min_grade
+            ]
+        elif filter_type == "odometer":
+            # Odometer filter (less than the specified value)
+            max_miles = int(filter_value)
+            filter_description = f"(Mileage ≤ {max_miles:,})"
+            filtered_transactions = [
+                tx for tx in transactions 
+                if "odometer" in tx and int(tx["odometer"]) <= max_miles
+            ]
+        elif filter_type == "date":
+            # Date filter (newer or equal to the specified date)
+            date_threshold = filter_value
+            filter_description = f"(Date ≥ {date_threshold})"
+            filtered_transactions = [
+                tx for tx in transactions 
+                if "saleDate" in tx and tx["saleDate"].split('T')[0] >= date_threshold
+            ]
+        elif filter_type == "region":
+            # Region filter (exact match)
+            region = filter_value
+            filter_description = f"(Region: {region})"
+            filtered_transactions = [
+                tx for tx in transactions 
+                if "region" in tx and tx["region"] == region
+            ]
+    
+    # Create a detailed message with all transactions
+    if filter_description:
+        message = f"📋 *Filtered Transactions for VIN:* `{vin}` {filter_description}\n\n"
+    else:
+        message = f"📋 *All Transactions for VIN:* `{vin}`\n\n"
+    
+    # Show count of displayed transactions vs total
+    message += f"*Showing {len(filtered_transactions)} of {len(transactions)} transactions*\n\n"
+    
+    # Display pagination info if needed
+    page = 1
+    transactions_per_page = 10
+    max_pages = (len(filtered_transactions) + transactions_per_page - 1) // transactions_per_page
+    
+    # Extract page number if in callback data (format additional part: :page:3)
+    if len(filter_parts) > 3 and filter_parts[3] == "page" and len(filter_parts) > 4:
+        try:
+            page = int(filter_parts[4])
+            if page < 1:
+                page = 1
+            elif page > max_pages:
+                page = max_pages
+        except ValueError:
+            page = 1
+    
+    # Calculate slice for pagination
+    start_idx = (page - 1) * transactions_per_page
+    end_idx = min(start_idx + transactions_per_page, len(filtered_transactions))
+    
+    # Add pagination info if needed
+    if len(filtered_transactions) > transactions_per_page:
+        message += f"*Page {page} of {max_pages}*\n\n"
+    
+    # Add filter options if we're on the first page and not already filtering
+    if page == 1 and not filter_type:
+        message += "*Filter options:* Use buttons below to filter transactions\n\n"
+    
+    # Display transactions for current page
+    for i, tx in enumerate(filtered_transactions[start_idx:end_idx], start_idx + 1):
         message += f"*Transaction #{i}*\n"
         
         if "price" in tx:
@@ -770,7 +1026,10 @@ async def view_all_transactions_callback(update: Update, context: ContextTypes.D
             message += f"• *Mileage:* {tx.get('odometer', 0):,} miles\n"
         
         if "conditionGrade" in tx:
-            message += f"• *Condition:* {tx.get('conditionGrade', 'N/A')}/5.0\n"
+            grade_value = tx.get('conditionGrade', 'N/A')
+            if isinstance(grade_value, (int, float)) and grade_value > 5:
+                grade_value = grade_value / 10.0
+            message += f"• *Condition:* {grade_value}/5.0\n"
         
         if "location" in tx:
             message += f"• *Location:* {tx.get('location', 'N/A')}\n"
@@ -791,11 +1050,65 @@ async def view_all_transactions_callback(update: Update, context: ContextTypes.D
         
         message += "\n"
     
+    # Create keyboard with filter options and pagination controls
+    keyboard = []
+    
+    # Add filter buttons on first page if not already filtered
+    if page == 1 and not filter_type:
+        # Grade filters
+        keyboard.append([
+            InlineKeyboardButton("Grade ≥ 4.0", callback_data="view_all_transactions:grade:4.0"),
+            InlineKeyboardButton("Grade ≥ 3.0", callback_data="view_all_transactions:grade:3.0")
+        ])
+        
+        # Mileage filters
+        keyboard.append([
+            InlineKeyboardButton("Miles ≤ 50k", callback_data="view_all_transactions:odometer:50000"),
+            InlineKeyboardButton("Miles ≤ 100k", callback_data="view_all_transactions:odometer:100000")
+        ])
+        
+        # Date filters - last 6 months and last 1 year
+        six_months_ago = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        keyboard.append([
+            InlineKeyboardButton("Last 6 Months", callback_data=f"view_all_transactions:date:{six_months_ago}"),
+            InlineKeyboardButton("Last Year", callback_data=f"view_all_transactions:date:{one_year_ago}")
+        ])
+    
+    # Add pagination controls if needed
+    if len(filtered_transactions) > transactions_per_page:
+        pagination_buttons = []
+        
+        # Previous page button (if not on first page)
+        if page > 1:
+            cb_data = f"view_all_transactions:{filter_type or ''}:{filter_value or ''}:page:{page - 1}"
+            pagination_buttons.append(InlineKeyboardButton("« Prev", callback_data=cb_data))
+            
+        # Page indicator
+        pagination_buttons.append(InlineKeyboardButton(f"{page}/{max_pages}", callback_data="noop"))
+        
+        # Next page button (if not on last page)
+        if page < max_pages:
+            cb_data = f"view_all_transactions:{filter_type or ''}:{filter_value or ''}:page:{page + 1}"
+            pagination_buttons.append(InlineKeyboardButton("Next »", callback_data=cb_data))
+            
+        keyboard.append(pagination_buttons)
+    
+    # Add reset filters button if currently filtering
+    if filter_type:
+        keyboard.append([InlineKeyboardButton("❌ Clear Filters", callback_data="view_all_transactions")])
+    
+    # Add a cancel button at the bottom
+    keyboard.append([InlineKeyboardButton("Close", callback_data="cancel")])
+    
+    # Set up reply markup
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     # Split message if it's too long
     MAX_MESSAGE_LENGTH = 4096  # Telegram's limit
     
     if len(message) <= MAX_MESSAGE_LENGTH:
-        await query.edit_message_text(message, parse_mode="Markdown")
+        await query.edit_message_text(message, parse_mode="Markdown", reply_markup=reply_markup)
     else:
         # Send initial message
         await query.edit_message_text("Sending transaction details...")
@@ -803,11 +1116,21 @@ async def view_all_transactions_callback(update: Update, context: ContextTypes.D
         # Split into multiple messages
         for i in range(0, len(message), MAX_MESSAGE_LENGTH):
             chunk = message[i:i + MAX_MESSAGE_LENGTH]
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, 
-                text=chunk,
-                parse_mode="Markdown"
-            )
+            
+            # Only add keyboard to the last chunk
+            if i + MAX_MESSAGE_LENGTH >= len(message):
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id, 
+                    text=chunk,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id, 
+                    text=chunk,
+                    parse_mode="Markdown"
+                )
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the refinement process."""
@@ -823,6 +1146,355 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode="Markdown"
     )
     return ConversationHandler.END
+    
+async def page_navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle pagination navigation for large result sets."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract page navigation data
+    # Format: page:vin:page_number or page:year:make:model:page_number
+    parts = query.data.split(':')
+    
+    if len(parts) < 3:
+        await query.edit_message_text("❌ Invalid pagination format", parse_mode="Markdown")
+        return
+    
+    # Check if it's a VIN or YMM navigation
+    page_number = int(parts[-1])
+    
+    # For VIN pagination
+    if len(parts) == 3:
+        vin = parts[1]
+        
+        # Try to find the data in user history
+        user_id = update.effective_user.id
+        vehicle_data = None
+        
+        if user_id in history_cache:
+            # Look for matching VIN in history
+            for entry in history_cache[user_id]:
+                if entry['type'] == 'vin' and entry['query']['vin'] == vin:
+                    vehicle_data = entry['data']
+                    break
+        
+        # If not found in history but user has active data
+        if not vehicle_data and user_id in user_data_dict and user_data_dict[user_id].get('vin') == vin:
+            vehicle_data = user_data_dict[user_id].get('data')
+        
+        if not vehicle_data:
+            await query.edit_message_text(
+                "❌ *Data no longer available*\nPlease perform a new search.",
+                parse_mode="Markdown"
+            )
+            return
+            
+        # Format the data for the requested page
+        MAX_MESSAGE_LENGTH = 4000
+        page_data = format_auction_data(vehicle_data, MAX_MESSAGE_LENGTH, page_number)
+        
+        # Create pagination controls
+        keyboard = []
+        pagination_row = []
+        
+        if page_number > 1:
+            pagination_row.append(InlineKeyboardButton("« Prev", callback_data=f"page:{vin}:{page_number-1}"))
+        
+        pagination_row.append(InlineKeyboardButton(f"{page_number}/{page_data['total_pages']}", callback_data="noop"))
+        
+        if page_number < page_data['total_pages']:
+            pagination_row.append(InlineKeyboardButton("Next »", callback_data=f"page:{vin}:{page_number+1}"))
+        
+        keyboard.append(pagination_row)
+        
+        # Add options to view all transactions if available
+        if "marketSummary" in vehicle_data and "transactions" in vehicle_data["marketSummary"]:
+            transactions = vehicle_data["marketSummary"]["transactions"]
+            if len(transactions) > 3:
+                keyboard.append([InlineKeyboardButton(
+                    f"📋 View All {len(transactions)} Transactions", 
+                    callback_data="view_all_transactions"
+                )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Update the message with the new page
+        await query.edit_message_text(
+            page_data['message'],
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    # For YMM pagination (not implemented yet, placeholder)
+    elif len(parts) == 5:
+        year = parts[1]
+        make = parts[2]
+        model = parts[3]
+        
+        # Similar implementation as above, but for YMM data
+        await query.edit_message_text(
+            f"YMM pagination not yet implemented. Page {page_number} for {year} {make} {model}",
+            parse_mode="Markdown"
+        )
+        
+async def generate_chart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate and send a price trend chart for a vehicle."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract VIN or YMM data from callback
+    parts = query.data.split(':')
+    if len(parts) < 2:
+        await query.edit_message_text("❌ Invalid chart request format", parse_mode="Markdown")
+        return
+    
+    chart_type = parts[0]  # "generate_chart"
+    identifier = parts[1]  # VIN or other identifier
+    
+    # Status message while generating chart
+    await query.edit_message_text("📊 *Generating price trend chart...*", parse_mode="Markdown")
+    
+    user_id = update.effective_user.id
+    vehicle_data = None
+    vehicle_info = ""
+    
+    # Find the vehicle data from user history or active context
+    if user_id in history_cache:
+        # Look for matching VIN in history
+        for entry in history_cache[user_id]:
+            if entry['type'] == 'vin' and entry['query']['vin'] == identifier:
+                vehicle_data = entry['data']
+                # Get basic vehicle info
+                if 'vehicle' in vehicle_data:
+                    v = vehicle_data['vehicle']
+                    if all(k in v for k in ['year', 'make', 'model']):
+                        vehicle_info = f"{v.get('year')} {v.get('make')} {v.get('model')}"
+                break
+    
+    # If not found in history but user has active data
+    if not vehicle_data and user_id in user_data_dict and user_data_dict[user_id].get('vin') == identifier:
+        vehicle_data = user_data_dict[user_id].get('data')
+        # Get basic vehicle info
+        if 'vehicle' in vehicle_data:
+            v = vehicle_data['vehicle']
+            if all(k in v for k in ['year', 'make', 'model']):
+                vehicle_info = f"{v.get('year')} {v.get('make')} {v.get('model')}"
+    
+    if not vehicle_data:
+        await query.edit_message_text(
+            "❌ *Data no longer available*\nPlease perform a new search to generate a chart.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Generate chart image
+    chart_image = generate_price_trend_chart(vehicle_data, vehicle_info)
+    
+    if not chart_image:
+        await query.edit_message_text(
+            "❌ *Unable to generate chart*\nNot enough price data available.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Send the chart image
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=chart_image,
+        caption=f"📈 *Price Trend Chart*\n{vehicle_info} (VIN: {identifier})",
+        parse_mode="Markdown"
+    )
+    
+    # Revert original message to indicate chart was sent
+    original_message = "📊 *Price trend chart generated!*"
+    await query.edit_message_text(original_message, parse_mode="Markdown")
+    
+def generate_price_trend_chart(data, vehicle_info="Vehicle"):
+    """
+    Generate a price trend chart image from vehicle data.
+    
+    Args:
+        data (dict): The vehicle data response from Manheim API
+        vehicle_info (str): Vehicle information for chart title
+        
+    Returns:
+        BytesIO: Image data as bytes I/O stream or None if not enough data
+    """
+    # Prepare data collections for chart
+    time_points = []
+    prices = []
+    price_labels = []
+    mileage_data = []
+    chart_title = f"Price Trend for {vehicle_info}"
+    
+    # Historical averages from API
+    if "historicalAverages" in data:
+        history = data["historicalAverages"]
+        
+        # Order periods from oldest to newest to chart correctly
+        periods = [
+            ("lastYear", "1 Year Ago"),
+            ("lastSixMonths", "6 Months Ago"),
+            ("lastMonth", "1 Month Ago"),
+            ("last30days", "Last 30 Days")
+        ]
+        
+        for period_key, period_label in periods:
+            if period_key in history and "price" in history[period_key]:
+                time_points.append(period_label)
+                price = history[period_key]["price"]
+                prices.append(price)
+                price_labels.append(f"${price:,.0f}")
+                
+                if "odometer" in history[period_key]:
+                    mileage_data.append(history[period_key]["odometer"])
+                else:
+                    mileage_data.append(None)
+    
+    # Add transaction data points if available
+    if "marketSummary" in data and "transactions" in data["marketSummary"]:
+        transactions = data["marketSummary"]["transactions"]
+        
+        # Only use transaction data if we have dates and prices
+        valid_transactions = [
+            tx for tx in transactions 
+            if "saleDate" in tx and "price" in tx
+        ]
+        
+        # Sort transactions by date (oldest to newest)
+        valid_transactions.sort(key=lambda tx: tx["saleDate"])
+        
+        # Only add up to 10 additional transaction points to keep chart readable
+        max_tx_points = 10
+        if len(valid_transactions) > max_tx_points:
+            # Intelligently sample the transactions to show trend
+            step = len(valid_transactions) // max_tx_points
+            valid_transactions = valid_transactions[::step][:max_tx_points]
+        
+        # Add transaction points to the chart
+        for tx in valid_transactions:
+            # Format the date to short form
+            date_str = tx["saleDate"].split("T")[0]
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                date_label = date_obj.strftime("%m/%d/%y")
+            except ValueError:
+                date_label = date_str
+                
+            time_points.append(date_label)
+            price = tx["price"]
+            prices.append(price)
+            price_labels.append(f"${price:,.0f}")
+            
+            if "odometer" in tx:
+                mileage_data.append(tx["odometer"])
+            else:
+                mileage_data.append(None)
+    
+    # Ensure we have at least 2 data points for a meaningful chart
+    if len(time_points) < 2:
+        return None
+    
+    # Create the chart
+    plt.figure(figsize=(10, 6))
+    
+    # Set style
+    plt.style.use('ggplot')
+    
+    # Plot price trend line
+    ax1 = plt.gca()
+    line1, = ax1.plot(time_points, prices, marker='o', linewidth=2, color='#3366cc', markersize=8)
+    
+    # Add price labels above each point
+    for i, price in enumerate(prices):
+        ax1.annotate(price_labels[i], 
+                    (time_points[i], prices[i]), 
+                    textcoords="offset points", 
+                    xytext=(0, 10), 
+                    ha='center',
+                    fontweight='bold')
+    
+    # Set up y-axis for prices
+    ax1.set_ylabel('Price (USD)', fontsize=12, fontweight='bold')
+    
+    # Add mileage information on secondary axis if available
+    has_mileage = any(m is not None for m in mileage_data)
+    if has_mileage:
+        ax2 = ax1.twinx()
+        # Filter out None values
+        valid_indices = [i for i, m in enumerate(mileage_data) if m is not None]
+        valid_timepoints = [time_points[i] for i in valid_indices]
+        valid_mileage = [mileage_data[i] for i in valid_indices]
+        
+        if valid_mileage:
+            line2, = ax2.plot(valid_timepoints, valid_mileage, marker='s', linestyle='--', 
+                             color='#ff9900', linewidth=1.5, markersize=6)
+            ax2.set_ylabel('Mileage', fontsize=12, fontweight='bold')
+            
+            # Add legend
+            if len(valid_mileage) > 1:
+                plt.legend([line1, line2], ['Price', 'Mileage'], loc='upper center', 
+                          bbox_to_anchor=(0.5, -0.15), ncol=2)
+            else:
+                plt.legend([line1], ['Price'], loc='upper center', 
+                          bbox_to_anchor=(0.5, -0.1))
+    else:
+        plt.legend([line1], ['Price'], loc='upper center', bbox_to_anchor=(0.5, -0.1))
+    
+    # Add forecasted price if available
+    if "forecast" in data:
+        forecast_points = []
+        forecast_prices = []
+        forecast_labels = []
+        
+        if "nextMonth" in data["forecast"] and "wholesale" in data["forecast"]["nextMonth"]:
+            forecast_points.append("Next Month")
+            forecast_prices.append(data["forecast"]["nextMonth"]["wholesale"])
+            forecast_labels.append(f"${data['forecast']['nextMonth']['wholesale']:,.0f}")
+        
+        if "nextYear" in data["forecast"] and "wholesale" in data["forecast"]["nextYear"]:
+            forecast_points.append("Next Year")
+            forecast_prices.append(data["forecast"]["nextYear"]["wholesale"])
+            forecast_labels.append(f"${data['forecast']['nextYear']['wholesale']:,.0f}")
+        
+        if forecast_points:
+            # Extend x-axis with forecast points
+            all_timepoints = time_points + forecast_points
+            all_prices = prices + forecast_prices
+            
+            # Plot forecast as a dotted line
+            ax1.plot(forecast_points, forecast_prices, marker='o', linestyle='dotted', 
+                    color='green', linewidth=2, markersize=8)
+            
+            # Add forecast labels
+            for i, price in enumerate(forecast_prices):
+                ax1.annotate(forecast_labels[i], 
+                           (forecast_points[i], forecast_prices[i]), 
+                           textcoords="offset points", 
+                           xytext=(0, 10), 
+                           ha='center', 
+                           fontweight='bold', 
+                           color='green')
+            
+            # Add "Forecast" notation
+            plt.figtext(0.7, 0.01, "Green points show forecasted values", 
+                       fontsize=9, style='italic', ha='center')
+    
+    # Set up chart title and layout
+    plt.title(chart_title, fontsize=14, fontweight='bold', pad=15)
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Save chart to bytes buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+    
+    # Close the figure to free memory
+    plt.close()
+    
+    return buf
 
 def validate_ymm(year, make, model):
     """
@@ -856,13 +1528,48 @@ def validate_ymm(year, make, model):
     
     return True, ""
 
-def get_ymm_valuation(year, make, model, trim=None):
-    """Get valuation data for Year/Make/Model from Manheim API."""
+def get_ymm_valuation(year, make, model, trim=None, **query_params):
+    """
+    Get valuation data for Year/Make/Model from Manheim API.
+    
+    Args:
+        year (str): Vehicle year
+        make (str): Vehicle manufacturer
+        model (str): Vehicle model
+        trim (str, optional): Vehicle trim
+        **query_params: Additional query parameters such as:
+            - date (str): Date for historical valuation (YYYY-MM-DD format)
+    """
     # Validate YMM parameters
     is_valid, error_msg = validate_ymm(year, make, model)
     if not is_valid:
         logger.error(f"Invalid YMM parameters: {error_msg} - {year}/{make}/{model}")
         return None
+        
+    # Validate date parameter
+    if "date" in query_params:
+        date_str = query_params["date"]
+        try:
+            # Check if date is in correct format
+            datetime.strptime(date_str, "%Y-%m-%d")
+            
+            # Check if date is after minimum allowed date (2018-10-08)
+            min_date = datetime.strptime("2018-10-08", "%Y-%m-%d")
+            requested_date = datetime.strptime(date_str, "%Y-%m-%d")
+            
+            if requested_date < min_date:
+                logger.warning(f"Date too early: {date_str}. Must be on or after 2018-10-08")
+                query_params["date"] = None
+                
+            # Check if date is in the future
+            today = datetime.now()
+            if requested_date > today:
+                logger.warning(f"Future date: {date_str}. Must be on or before today's date")
+                query_params["date"] = None
+                
+        except ValueError:
+            logger.warning(f"Invalid date format: {date_str}. Must be in YYYY-MM-DD format")
+            query_params["date"] = None
     
     # Get authentication token
     token = get_manheim_token()
@@ -883,6 +1590,11 @@ def get_ymm_valuation(year, make, model, trim=None):
     params = {}
     if trim:
         params["trim"] = trim
+        
+    # Add additional query parameters
+    for key, value in query_params.items():
+        if value is not None:
+            params[key] = value
     
     headers = {
         "Authorization": f"Bearer {token}",
@@ -932,14 +1644,37 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(context.args) < 3:
         await update.message.reply_text(
             "❓ *Please provide Year, Make, and Model*\n\n"
-            "*Example:* `/ymm 2020 Honda Accord`",
+            "*Examples:*\n"
+            "• `/ymm 2020 Honda Accord`\n"
+            "• `/ymm 2020 Honda Accord date=2023-05-15`",
             parse_mode="Markdown"
         )
         return
 
-    year = context.args[0]
-    make = context.args[1]
-    model = " ".join(context.args[2:])
+    # Extract basic YMM parameters first
+    basic_args = []
+    keyword_args = {}
+    
+    for arg in context.args:
+        if '=' in arg:
+            key, value = arg.split('=', 1)
+            keyword_args[key.lower()] = value
+        else:
+            basic_args.append(arg)
+    
+    # We need at least 3 basic args for year, make, model
+    if len(basic_args) < 3:
+        await update.message.reply_text(
+            "❓ *Missing required parameters*\n\n"
+            "Year, Make, and Model are required.\n"
+            "*Example:* `/ymm 2020 Honda Accord`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    year = basic_args[0]
+    make = basic_args[1]
+    model = " ".join(basic_args[2:])
     
     # Validate YMM parameters before proceeding
     is_valid, error_msg = validate_ymm(year, make, model)
@@ -952,14 +1687,51 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     
+    # Validate and process keyword arguments
+    query_params = {}
+    
+    # Process date parameter if present
+    if 'date' in keyword_args:
+        date_value = keyword_args['date']
+        try:
+            # Parse date to validate format
+            requested_date = datetime.strptime(date_value, "%Y-%m-%d")
+            
+            # Check if date is after minimum allowed date (2018-10-08)
+            min_date = datetime.strptime("2018-10-08", "%Y-%m-%d")
+            if requested_date < min_date:
+                await update.message.reply_text(
+                    f"⚠️ *Warning*: Date must be on or after 2018-10-08. Using current date.",
+                    parse_mode="Markdown"
+                )
+            # Check if date is in the future
+            elif requested_date > datetime.now():
+                await update.message.reply_text(
+                    f"⚠️ *Warning*: Date cannot be in the future. Using current date.",
+                    parse_mode="Markdown"
+                )
+            else:
+                query_params['date'] = date_value
+                
+        except ValueError:
+            await update.message.reply_text(
+                f"⚠️ *Warning*: Invalid date format '{date_value}'. Must be in YYYY-MM-DD format. Using current date.",
+                parse_mode="Markdown"
+            )
+    
+    # Construct search message
+    search_message = f"🔍 *Searching for:* `{year} {make} {model}`"
+    if 'date' in query_params:
+        search_message += f"\n*Date:* {query_params['date']}"
+    
     await update.message.reply_text(
-        f"🔍 *Searching for:* `{year} {make} {model}`...",
+        search_message + "...",
         parse_mode="Markdown"
     )
     
     try:
         # Get vehicle data from Manheim API
-        data = get_ymm_valuation(year, make, model)
+        data = get_ymm_valuation(year, make, model, **query_params)
         
         if not data:
             await update.message.reply_text(
@@ -978,7 +1750,7 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             history_cache[user_id] = []
             
         # Add the new lookup to the start of the list (most recent first)
-        history_cache[user_id].insert(0, {
+        history_entry = {
             'type': 'ymm',
             'query': {
                 'year': year,
@@ -987,7 +1759,13 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             },
             'data': data,
             'timestamp': datetime.now()
-        })
+        }
+        
+        # Add date to query if used
+        if 'date' in query_params:
+            history_entry['query']['date'] = query_params['date']
+            
+        history_cache[user_id].insert(0, history_entry)
         
         # Keep only the 10 most recent lookups
         if len(history_cache[user_id]) > 10:
@@ -1000,62 +1778,206 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parse_mode="Markdown"
         )
 
-def format_auction_data(data):
-    """Format the auction data into a readable message based on Manheim Valuations API structure."""
-    if not isinstance(data, dict):
-        return f"🚗 *Vehicle Auction Data*\n\n{str(data)}"
+def format_auction_data(data, max_length=None, page=1):
+    """
+    Format the auction data into a readable message based on Manheim Valuations API structure.
     
-    message = "🚗 *Vehicle Auction Data*\n\n"
+    Args:
+        data (dict): The API response data to format
+        max_length (int, optional): Maximum message length to return (for pagination)
+        page (int, optional): Page number for paginated results
+        
+    Returns:
+        dict: Dictionary containing message parts and pagination info
+    """
+    if not isinstance(data, dict):
+        return {"message": f"🚗 *Vehicle Auction Data*\n\n{str(data)}", "has_more": False, "total_pages": 1}
+    
+    # Main message content
+    message = []
+    message.append("🚗 *Vehicle Auction Data*\n\n")
+    
+    # Create different sections that can be paginated
+    sections = []
+    
+    # Section 1: Basic vehicle and valuation info
+    section1 = ""
+    
+    # Add valuation date if present
+    if "requestedDate" in data:
+        section1 += f"📅 *Valuation Date:* {data['requestedDate']}\n\n"
     
     # Vehicle information
     if "vehicle" in data:
         vehicle = data["vehicle"]
-        message += "📋 *Vehicle Info*\n"
+        section1 += "📋 *Vehicle Info*\n"
         if "year" in vehicle and "make" in vehicle and "model" in vehicle:
-            message += f"• *{vehicle.get('year')} {vehicle.get('make')} {vehicle.get('model')}"
+            section1 += f"• *{vehicle.get('year')} {vehicle.get('make')} {vehicle.get('model')}"
             if "trim" in vehicle:
-                message += f" {vehicle.get('trim')}"
-            message += "*\n"
+                section1 += f" {vehicle.get('trim')}"
+            section1 += "*\n"
         if "vin" in vehicle:
-            message += f"• VIN: `{vehicle.get('vin')}`\n"
+            section1 += f"• VIN: `{vehicle.get('vin')}`\n"
         if "style" in vehicle:
-            message += f"• Style: {vehicle.get('style')}\n"
+            section1 += f"• Style: {vehicle.get('style')}\n"
         if "engineSize" in vehicle:
-            message += f"• Engine: {vehicle.get('engineSize')}\n"
+            section1 += f"• Engine: {vehicle.get('engineSize')}\n"
         if "transmission" in vehicle:
-            message += f"• Transmission: {vehicle.get('transmission')}\n"
+            section1 += f"• Transmission: {vehicle.get('transmission')}\n"
         if "drivetrain" in vehicle:
-            message += f"• Drivetrain: {vehicle.get('drivetrain')}\n"
-        message += "\n"
+            section1 += f"• Drivetrain: {vehicle.get('drivetrain')}\n"
+        if "subSeries" in vehicle:
+            section1 += f"• SubSeries: {vehicle.get('subSeries')}\n"
+        section1 += "\n"
     
-    # Wholesale value ranges
-    if "wholesaleAverages" in data:
-        message += "💰 *Wholesale Values*\n"
-        wholesale = data["wholesaleAverages"]
+    # Current wholesale and retail values
+    if "adjustedPricing" in data:
+        pricing = data["adjustedPricing"]
+        section1 += "💰 *Current Valuation*\n"
         
-        # Aggregate average
-        if "aggregateAverage" in wholesale:
-            agg = wholesale["aggregateAverage"]
-            if "average" in agg:
-                message += f"• *Aggregate Average:* ${agg.get('average', 0):,.2f}\n"
-            if "rough" in agg and "clean" in agg:
-                message += f"  Range: ${agg.get('rough', 0):,.2f} - ${agg.get('clean', 0):,.2f}\n"
+        # Wholesale values
+        if "wholesale" in pricing:
+            wholesale = pricing["wholesale"]
+            section1 += f"• *Wholesale Value:* ${wholesale.get('average', 0):,.2f}\n"
+            section1 += f"  Range: ${wholesale.get('below', 0):,.2f} - ${wholesale.get('above', 0):,.2f}\n"
         
-        # Adjusted MMR
-        if "adjustedMMR" in wholesale:
-            adj = wholesale["adjustedMMR"]
-            if "average" in adj:
-                message += f"• *Adjusted MMR:* ${adj.get('average', 0):,.2f}\n"
-            if "rough" in adj and "clean" in adj:
-                message += f"  Range: ${adj.get('rough', 0):,.2f} - ${adj.get('clean', 0):,.2f}\n"
+        # Retail values
+        if "retail" in pricing:
+            retail = pricing["retail"]
+            section1 += f"• *Retail Value:* ${retail.get('average', 0):,.2f}\n"
+            section1 += f"  Range: ${retail.get('below', 0):,.2f} - ${retail.get('above', 0):,.2f}\n"
+            
+        # Adjustment factors
+        if "adjustedBy" in pricing:
+            adjustments = pricing["adjustedBy"]
+            if adjustments and any(adjustments.values()):
+                section1 += "• *Adjusted For:* "
+                factors = []
+                
+                if "Color" in adjustments:
+                    factors.append(f"Color: {adjustments['Color']}")
+                if "Grade" in adjustments:
+                    grade_value = adjustments['Grade']
+                    # Convert grade from integer format (50) to decimal format (5.0)
+                    try:
+                        grade_decimal = float(grade_value) / 10.0
+                        factors.append(f"Grade: {grade_decimal:.1f}")
+                    except (ValueError, TypeError):
+                        factors.append(f"Grade: {grade_value}")
+                if "Odometer" in adjustments:
+                    factors.append(f"Mileage: {int(adjustments['Odometer']):,}")
+                if "Region" in adjustments and adjustments["Region"] != "NA":
+                    factors.append(f"Region: {adjustments['Region']}")
+                    
+                section1 += ", ".join(factors) + "\n"
         
-        # Base MMR
-        if "baseMMR" in wholesale:
-            base = wholesale["baseMMR"]
-            if "average" in base:
-                message += f"• *Base MMR:* ${base.get('average', 0):,.2f}\n"
+        section1 += "\n"
+    
+    sections.append(section1)
+    
+    # Section 2: Historical trends and forecasts
+    section2 = ""
+    
+    # Historical trends
+    if "historicalAverages" in data:
+        history = data["historicalAverages"]
+        section2 += "📈 *Historical Price Trends*\n"
         
-        message += "\n"
+        trend_data = []
+        
+        if "last30days" in history and "price" in history["last30days"]:
+            trend_data.append({
+                "period": "Last 30 Days",
+                "price": history["last30days"].get("price", 0),
+                "odometer": history["last30days"].get("odometer", 0)
+            })
+            
+        if "lastMonth" in history and "price" in history["lastMonth"]:
+            trend_data.append({
+                "period": "Last Month",
+                "price": history["lastMonth"].get("price", 0),
+                "odometer": history["lastMonth"].get("odometer", 0)
+            })
+            
+        if "lastSixMonths" in history and "price" in history["lastSixMonths"]:
+            trend_data.append({
+                "period": "Last 6 Months",
+                "price": history["lastSixMonths"].get("price", 0),
+                "odometer": history["lastSixMonths"].get("odometer", 0)
+            })
+            
+        if "lastYear" in history and "price" in history["lastYear"]:
+            trend_data.append({
+                "period": "Last Year",
+                "price": history["lastYear"].get("price", 0),
+                "odometer": history["lastYear"].get("odometer", 0)
+            })
+            
+        # Show historical data
+        for item in trend_data:
+            section2 += f"• *{item['period']}:* ${item['price']:,.2f}"
+            if item['odometer']:
+                section2 += f" @ {item['odometer']:,} miles\n"
+            else:
+                section2 += "\n"
+                
+        section2 += "\n"
+    
+    # Forecast data
+    if "forecast" in data:
+        forecast = data["forecast"]
+        section2 += "🔮 *Price Forecast*\n"
+        
+        if "nextMonth" in forecast:
+            section2 += "• *Next Month:*\n"
+            if "wholesale" in forecast["nextMonth"]:
+                section2 += f"  Wholesale: ${forecast['nextMonth']['wholesale']:,.2f}\n"
+            if "retail" in forecast["nextMonth"]:
+                section2 += f"  Retail: ${forecast['nextMonth']['retail']:,.2f}\n"
+                
+        if "nextYear" in forecast:
+            section2 += "• *Next Year:*\n"
+            if "wholesale" in forecast["nextYear"]:
+                section2 += f"  Wholesale: ${forecast['nextYear']['wholesale']:,.2f}\n"
+            if "retail" in forecast["nextYear"]:
+                section2 += f"  Retail: ${forecast['nextYear']['retail']:,.2f}\n"
+                
+        section2 += "\n"
+    
+    sections.append(section2)
+    
+    # Section 3: Summary statistics
+    section3 = ""
+    
+    # Sample size and accuracy indicators
+    if "sampleSize" in data:
+        section3 += f"• *Sample Size:* {data['sampleSize']} transactions\n"
+    if "extendedCoverage" in data and data["extendedCoverage"]:
+        section3 += "• Note: Uses Small Sample Size\n"
+    if "bestMatch" in data and data["bestMatch"]:
+        section3 += "• *Best Match* found for this VIN\n\n"
+    
+    # Market statistics
+    if "marketSummary" in data and "statistics" in data["marketSummary"]:
+        stats = data["marketSummary"]["statistics"]
+        section3 += "📊 *Market Summary*\n"
+        
+        if "averagePrice" in stats:
+            section3 += f"• *Avg Price:* ${stats.get('averagePrice', 0):,.2f}\n"
+        if "averageOdometer" in stats:
+            section3 += f"• *Avg Mileage:* {stats.get('averageOdometer', 0):,} miles\n"
+        if "averageConditionGrade" in stats:
+            grade_value = stats.get('averageConditionGrade', 0)
+            if grade_value > 5:  # Convert from integer format (50 = 5.0)
+                grade_value = grade_value / 10.0
+            section3 += f"• *Avg Condition:* {grade_value:.1f}/5.0\n"
+        if "transactionCount" in stats:
+            section3 += f"• *Total Transactions:* {stats.get('transactionCount', 0)}\n\n"
+    
+    sections.append(section3)
+    
+    # Section 4: Recent transactions
+    section4 = ""
     
     # Recent auction transactions
     if "marketSummary" in data and "transactions" in data["marketSummary"]:
@@ -1064,7 +1986,7 @@ def format_auction_data(data):
             # Store transactions for potential detailed view
             data["transaction_count"] = len(transactions)
             
-            message += f"🔄 *Recent Transactions* ({len(transactions)} total)\n"
+            section4 += f"🔄 *Recent Transactions* ({len(transactions)} total)\n"
             for i, tx in enumerate(transactions[:3], 1):  # Show only 3 in the summary view
                 sale_info = []
                 
@@ -1075,40 +1997,104 @@ def format_auction_data(data):
                     sale_date = tx.get('saleDate', '').split('T')[0]  # Format ISO date
                     sale_info.append(f"{sale_date}")
                 
-                message += f"*{i}.* {' on '.join(sale_info)}\n"
+                section4 += f"*{i}.* {' on '.join(sale_info)}\n"
                 
                 details = []
                 if "odometer" in tx:
                     details.append(f"{tx.get('odometer', 0):,} miles")
                 if "conditionGrade" in tx:
-                    details.append(f"Grade: {tx.get('conditionGrade', 'N/A')}/5.0")
+                    grade_value = tx.get('conditionGrade', 'N/A')
+                    if isinstance(grade_value, (int, float)):
+                        # Handle case where grade is already a decimal or needs conversion from integer (50 = 5.0)
+                        if grade_value > 5:  # Likely the 50 = 5.0 format
+                            grade_value = grade_value / 10.0
+                        details.append(f"Grade: {grade_value:.1f}/5.0")
+                    else:
+                        details.append(f"Grade: {grade_value}/5.0")
                 if "location" in tx:
                     details.append(f"{tx.get('location', 'N/A')}")
                 
                 if details:
-                    message += f"   _({' | '.join(details)})_\n"
+                    section4 += f"   _({' | '.join(details)})_\n"
                 
-            message += "\n"
+            section4 += "\n"
             
             # Add note about viewing all transactions if there are more than shown
             if len(transactions) > 3:
-                message += f"_...and {len(transactions) - 3} more transactions. Use the button below to view all._\n\n"
-            
-    # Market statistics
-    if "marketSummary" in data and "statistics" in data["marketSummary"]:
-        stats = data["marketSummary"]["statistics"]
-        message += "📊 *Market Summary*\n"
-        
-        if "averagePrice" in stats:
-            message += f"• *Avg Price:* ${stats.get('averagePrice', 0):,.2f}\n"
-        if "averageOdometer" in stats:
-            message += f"• *Avg Mileage:* {stats.get('averageOdometer', 0):,} miles\n"
-        if "averageConditionGrade" in stats:
-            message += f"• *Avg Condition:* {stats.get('averageConditionGrade', 0):.1f}/5.0\n"
-        if "transactionCount" in stats:
-            message += f"• *Total Transactions:* {stats.get('transactionCount', 0)}\n"
+                section4 += f"_...and {len(transactions) - 3} more transactions. Use the button below to view all._\n\n"
     
-    return message
+    sections.append(section4)
+    
+    # Handle pagination if requested
+    if max_length is not None:
+        total_length = sum(len(s) for s in sections)
+        total_pages = (total_length + max_length - 1) // max_length
+        
+        if page < 1:
+            page = 1
+        elif page > total_pages:
+            page = total_pages
+        
+        # If we need pagination, build message differently
+        if total_pages > 1:
+            # Add pagination header
+            current_message = f"🚗 *Vehicle Auction Data* (Page {page}/{total_pages})\n\n"
+            
+            # Calculate which sections to include based on page
+            remaining_length = max_length - len(current_message)
+            message_parts = []
+            
+            if page == 1:
+                # First page always includes basic info
+                for section in sections:
+                    if len(current_message) + len(section) <= max_length:
+                        current_message += section
+                    else:
+                        break
+            else:
+                # For other pages, need to skip content that would be on earlier pages
+                cumulative_length = len(f"🚗 *Vehicle Auction Data* (Page 1/{total_pages})\n\n")
+                
+                for section in sections:
+                    section_length = len(section)
+                    
+                    # If adding this section would put us on a page before the requested page,
+                    # skip to the next section
+                    if cumulative_length + section_length <= (page - 1) * max_length:
+                        cumulative_length += section_length
+                        continue
+                    
+                    # If this section spans the current page
+                    start_offset = max(0, (page - 1) * max_length - cumulative_length)
+                    end_offset = min(section_length, page * max_length - cumulative_length)
+                    
+                    if start_offset < end_offset:
+                        # Extract the portion of this section that belongs on this page
+                        section_part = section[start_offset:end_offset]
+                        current_message += section_part
+                    
+                    cumulative_length += section_length
+                    
+                    # If we've filled this page, stop
+                    if cumulative_length >= page * max_length:
+                        break
+            
+            return {
+                "message": current_message, 
+                "has_more": page < total_pages, 
+                "total_pages": total_pages,
+                "current_page": page
+            }
+        
+    # If no pagination or just one page, combine all sections
+    full_message = "".join(message) + "".join(sections)
+    
+    return {
+        "message": full_message, 
+        "has_more": False, 
+        "total_pages": 1,
+        "current_page": 1
+    }
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display user's search history."""
@@ -1152,6 +2138,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if lookup_type == "VIN":
             vin = item['query']['vin']
             refined = item.get('refined', False)
+            historical = item.get('historical', False)
             
             # Get vehicle info from data if available
             vehicle_info = ""
@@ -1160,7 +2147,17 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if all(k in vehicle for k in ['year', 'make', 'model']):
                     vehicle_info = f" - {vehicle.get('year')} {vehicle.get('make')} {vehicle.get('model')}"
             
-            message += f"*{i}.* {lookup_type}: `{vin}`{vehicle_info}\n"
+            # Add indicators for special searches
+            indicators = []
+            if historical and 'date' in item['query']['params']:
+                date_value = item['query']['params']['date']
+                indicators.append(f"📅 {date_value}")
+            if refined:
+                indicators.append("🔄 Refined")
+                
+            indicator_text = f" ({', '.join(indicators)})" if indicators else ""
+            
+            message += f"*{i}.* {lookup_type}: `{vin}`{vehicle_info}{indicator_text}\n"
             
             # Add parameters if any
             params = []
@@ -1170,19 +2167,24 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 params.append(f"Transmission: {item['query']['transmission']}")
                 
             for key, value in item['query']['params'].items():
-                params.append(f"{key.capitalize()}: {value}")
+                # Skip date as it's already shown in the indicators
+                if key != 'date':
+                    params.append(f"{key.capitalize()}: {value}")
                 
             if params:
                 message += f"   _Parameters: {', '.join(params)}_\n"
-                
-            if refined:
-                message += f"   _Refined search_\n"
                 
         elif lookup_type == "YMM":
             year = item['query']['year']
             make = item['query']['make']
             model = item['query']['model']
-            message += f"*{i}.* {lookup_type}: {year} {make} {model}\n"
+            
+            # Add date indicator if historical lookup
+            date_indicator = ""
+            if 'date' in item['query']:
+                date_indicator = f" (📅 {item['query']['date']})"
+                
+            message += f"*{i}.* {lookup_type}: {year} {make} {model}{date_indicator}\n"
             
         message += f"   _({timestamp})_\n\n"
     
@@ -1230,7 +2232,9 @@ def main() -> None:
     application.add_handler(CommandHandler("history", history_command))
     
     # Add callback handlers
-    application.add_handler(CallbackQueryHandler(view_all_transactions_callback, pattern="^view_all_transactions$"))
+    application.add_handler(CallbackQueryHandler(view_all_transactions_callback, pattern="^view_all_transactions"))
+    application.add_handler(CallbackQueryHandler(page_navigation_callback, pattern="^page:"))
+    application.add_handler(CallbackQueryHandler(generate_chart_callback, pattern="^generate_chart:"))
     application.add_handler(refinement_conv_handler)
 
     try:
