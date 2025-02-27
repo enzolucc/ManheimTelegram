@@ -127,7 +127,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚘 *Welcome to Vehicle Auction Bot!*\n\n"
         "*Available commands:*\n"
         "• `/vin [VIN]` - Get auction data for a VIN\n"
-        "• `/ymm [Year] [Make] [Model]` - Get data by Year/Make/Model\n\n"
+        "• `/ymm [Year] [Make] [Model]` - Get data by Year/Make/Model\n"
+        "• `/history` - View your recent lookups\n\n"
         "Type `/help` for detailed examples and advanced options",
         parse_mode="Markdown"
     )
@@ -150,6 +151,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         "*Year/Make/Model Lookup:*\n"
         "• `/ymm 2020 Honda Accord`\n\n"
+        
+        "*History and Previous Lookups:*\n"
+        "• `/history` - View your 10 most recent lookups\n"
+        "• `/history VIN` - View only VIN lookups\n"
+        "• `/history YMM` - View only Year/Make/Model lookups\n\n"
         
         "*Testing Example:*\n"
         "• Test VIN (UAT): `WBA3C1C5XFP853102`\n\n"
@@ -304,8 +310,12 @@ def get_vin_valuation(vin, subseries=None, transmission=None, **query_params):
 # State definitions for conversation
 CHOOSING_COLOR, CHOOSING_GRADE, CHOOSING_ODOMETER, CHOOSING_REGION = range(4)
 
-# Data storage for conversation context
+# Data storage for conversation context and history
 user_data_dict = {}
+
+# History cache to store previous lookups
+# Structure: {user_id: [{'type': 'vin|ymm', 'query': VIN or YMM dict, 'data': API response, 'timestamp': datetime}]}
+history_cache = {}
 
 async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get auction data for a specific VIN with optional parameters."""
@@ -443,6 +453,27 @@ async def vin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             'params': query_params,
             'data': data  # Store full data response
         }
+        
+        # Add to history cache
+        if user_id not in history_cache:
+            history_cache[user_id] = []
+            
+        # Add the new lookup to the start of the list (most recent first)
+        history_cache[user_id].insert(0, {
+            'type': 'vin',
+            'query': {
+                'vin': vin,
+                'subseries': subseries,
+                'transmission': transmission,
+                'params': query_params.copy()
+            },
+            'data': data,
+            'timestamp': datetime.now()
+        })
+        
+        # Keep only the 10 most recent lookups
+        if len(history_cache[user_id]) > 10:
+            history_cache[user_id].pop()
         
         # Create keyboard with appropriate options
         keyboard = []
@@ -650,8 +681,31 @@ async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             message = format_auction_data(data)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"📊 Refined Valuation Results:\n\n{message}"
+                text=f"📊 Refined Valuation Results:\n\n{message}",
+                parse_mode="Markdown"
             )
+            
+            # Add to history cache
+            if user_id not in history_cache:
+                history_cache[user_id] = []
+                
+            # Add the refined lookup to the history
+            history_cache[user_id].insert(0, {
+                'type': 'vin',
+                'query': {
+                    'vin': vin,
+                    'subseries': subseries,
+                    'transmission': transmission,
+                    'params': params.copy()
+                },
+                'data': data,
+                'timestamp': datetime.now(),
+                'refined': True
+            })
+            
+            # Keep only the 10 most recent lookups
+            if len(history_cache[user_id]) > 10:
+                history_cache[user_id].pop()
             
     except Exception as e:
         logger.error(f"Error fetching refined VIN data: {e}")
@@ -918,6 +972,27 @@ async def ymm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         message = format_auction_data(data)
         await update.message.reply_text(message, parse_mode="Markdown")
         
+        # Add to history cache
+        user_id = update.effective_user.id
+        if user_id not in history_cache:
+            history_cache[user_id] = []
+            
+        # Add the new lookup to the start of the list (most recent first)
+        history_cache[user_id].insert(0, {
+            'type': 'ymm',
+            'query': {
+                'year': year,
+                'make': make,
+                'model': model
+            },
+            'data': data,
+            'timestamp': datetime.now()
+        })
+        
+        # Keep only the 10 most recent lookups
+        if len(history_cache[user_id]) > 10:
+            history_cache[user_id].pop()
+        
     except Exception as e:
         logger.error(f"Error fetching YMM data: {e}")
         await update.message.reply_text(
@@ -1035,6 +1110,90 @@ def format_auction_data(data):
     
     return message
 
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display user's search history."""
+    user_id = update.effective_user.id
+    
+    # Check if user has any history
+    if user_id not in history_cache or not history_cache[user_id]:
+        await update.message.reply_text(
+            "📭 *No search history found*\n\n"
+            "Try searching for a VIN or Year/Make/Model first.",
+            parse_mode="Markdown"
+        )
+        return
+        
+    # Check for filter argument (VIN or YMM)
+    filter_type = None
+    if context.args:
+        filter_arg = context.args[0].upper()
+        if filter_arg in ["VIN", "YMM"]:
+            filter_type = filter_arg.lower()
+    
+    # Filter history based on argument if provided
+    history = history_cache[user_id]
+    if filter_type:
+        history = [item for item in history if item['type'] == filter_type]
+        
+        if not history:
+            await update.message.reply_text(
+                f"📭 *No {filter_type.upper()} lookups found in your history*",
+                parse_mode="Markdown"
+            )
+            return
+    
+    # Create history message
+    message = "📋 *Your Search History*\n\n"
+    
+    for i, item in enumerate(history, 1):
+        lookup_type = item['type'].upper()
+        timestamp = item['timestamp'].strftime("%Y-%m-%d %H:%M")
+        
+        if lookup_type == "VIN":
+            vin = item['query']['vin']
+            refined = item.get('refined', False)
+            
+            # Get vehicle info from data if available
+            vehicle_info = ""
+            if 'data' in item and 'vehicle' in item['data']:
+                vehicle = item['data']['vehicle']
+                if all(k in vehicle for k in ['year', 'make', 'model']):
+                    vehicle_info = f" - {vehicle.get('year')} {vehicle.get('make')} {vehicle.get('model')}"
+            
+            message += f"*{i}.* {lookup_type}: `{vin}`{vehicle_info}\n"
+            
+            # Add parameters if any
+            params = []
+            if item['query']['subseries']:
+                params.append(f"Subseries: {item['query']['subseries']}")
+            if item['query']['transmission']:
+                params.append(f"Transmission: {item['query']['transmission']}")
+                
+            for key, value in item['query']['params'].items():
+                params.append(f"{key.capitalize()}: {value}")
+                
+            if params:
+                message += f"   _Parameters: {', '.join(params)}_\n"
+                
+            if refined:
+                message += f"   _Refined search_\n"
+                
+        elif lookup_type == "YMM":
+            year = item['query']['year']
+            make = item['query']['make']
+            model = item['query']['model']
+            message += f"*{i}.* {lookup_type}: {year} {make} {model}\n"
+            
+        message += f"   _({timestamp})_\n\n"
+    
+    # Add usage note
+    message += "💡 *To reuse a previous search:*\n"
+    message += "• For VIN: Use `/vin [VIN]`\n"
+    message += "• For YMM: Use `/ymm [Year] [Make] [Model]`\n"
+    
+    # Send history message
+    await update.message.reply_text(message, parse_mode="Markdown")
+
 def main() -> None:
     """Start the bot."""
     # Check if the Telegram token is configured
@@ -1068,6 +1227,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("vin", vin_command))
     application.add_handler(CommandHandler("ymm", ymm_command))
+    application.add_handler(CommandHandler("history", history_command))
     
     # Add callback handlers
     application.add_handler(CallbackQueryHandler(view_all_transactions_callback, pattern="^view_all_transactions$"))
