@@ -1,13 +1,40 @@
 # Vehicle Auction Data Telegram Bot
 
-A Telegram bot that provides vehicle auction data from Manheim using the python-telegram-bot library.
+A Telegram bot that provides comprehensive vehicle auction data from Manheim using the python-telegram-bot library. Analyze historical prices, generate trend charts, filter transactions, and more.
 
 ## Features
 
+### Core Capabilities
 - Look up vehicle auction data by VIN
 - Look up vehicle auction data by Year/Make/Model
 - Interactive refinement of valuations with color, grade, mileage, and region
 - View recent transactions, estimated values, and market trends
+- Search history management to track previous lookups
+
+### Data Visualization
+- **📈 Price Trend Charts**: Generate visual charts showing historical price trends, with:
+  - Historical average prices
+  - Individual transaction data points
+  - Mileage trend correlation
+  - Price forecasts for future values
+  - Professional visualization with clear labels
+
+### Advanced Data Management
+- **🔍 Transaction Filtering**: Filter auction transaction data by:
+  - Condition grade (e.g., show only 4.0+ condition vehicles)
+  - Mileage (e.g., under 50,000 miles)
+  - Date range (e.g., last 6 months only)
+  - Geographic region
+
+- **📄 Pagination for Large Datasets**: Navigate through:
+  - Large vehicle data responses
+  - Transaction lists with many entries
+  - Multi-page results with prev/next controls
+
+### Historical Data
+- View valuations from specific dates in the past
+- Track how vehicle values have changed over time
+- Compare historical averages against recent transactions
 
 ## Setup
 
@@ -42,13 +69,48 @@ A Telegram bot that provides vehicle auction data from Manheim using the python-
 
 Once the bot is running, users can interact with it using these commands:
 
+### Basic Commands
 - `/start` - Introduction to the bot
-- `/help` - List of available commands
+- `/help` - List of available commands and features
+- `/history` - View your recent lookup history
+
+### Vehicle Lookup
 - `/vin [VIN]` - Get auction data for a specific VIN
 - `/vin [VIN] color=COLOR grade=GRADE odometer=MILES region=REGION` - Get auction data with specific parameters
+- `/vin [VIN] date=YYYY-MM-DD` - Get historical valuation for a specific date
 - `/ymm [Year] [Make] [Model]` - Get auction data for a Year/Make/Model
+- `/ymm [Year] [Make] [Model] date=YYYY-MM-DD` - Get historical Year/Make/Model data
 
-## Note on Manheim API
+### Interactive Features
+After a search, the bot provides interactive buttons to:
+- Refine valuation with specific parameters
+- Filter transaction data by various criteria
+- Generate price trend charts
+- Navigate through paginated results
+- View all transactions with filtering options
+
+## Parameter Options
+
+### Common Parameters
+- `color` - Vehicle color (e.g., WHITE, BLACK, SILVER)
+- `grade` - Vehicle condition grade (e.g., 1.0, 3.5, 4.5) on a 0-5 scale
+- `odometer` - Vehicle mileage in miles
+- `region` - Geographic region (NE, SE, MW, SW, W)
+- `date` - Historical valuation date in YYYY-MM-DD format (must be after 2018-10-08)
+
+### VIN-Specific Options
+- Subseries - Specific trim level/subseries (e.g., SE, LX)
+- Transmission - Transmission type (e.g., AUTO, MANUAL)
+
+## Transaction Filtering
+
+The bot allows filtering transaction data by:
+1. **Grade**: Show only vehicles with grades above a threshold (e.g., 3.0, 4.0)
+2. **Mileage**: Show only vehicles with mileage below a threshold (e.g., 50k, 100k)
+3. **Date**: Show only transactions within time periods (e.g., last 6 months, last year)
+4. **Region**: Show only transactions from specific geographic regions
+
+## Manheim API Integration
 
 This bot uses the official Manheim Valuations API to retrieve auction data. You'll need to register for API access at [Manheim's Developer Portal](https://developer.manheim.com) and obtain client credentials (client ID and client secret) to use this bot.
 
@@ -74,17 +136,12 @@ The bot uses the following Manheim API endpoints:
 For testing in the UAT environment, you can use this example VIN:
 - WBA3C1C5XFP853102
 
-Example query with parameters:
+Example queries:
 ```
+/vin WBA3C1C5XFP853102
 /vin WBA3C1C5XFP853102 color=WHITE grade=3.5 odometer=20000 region=NE
+/vin WBA3C1C5XFP853102 date=2023-05-15
+/ymm 2020 Honda Accord
 ```
-
-Supported query parameters:
-- `color` - Vehicle color (e.g., WHITE, BLACK, SILVER)
-- `grade` - Vehicle condition grade (e.g., 1.0, 3.5, 4.5) on a 0-5 scale
-- `odometer` - Vehicle mileage in miles
-- `region` - Geographic region (NE, SE, MW, SW, W)
-
-The bot also features an interactive refinement process where you can select these parameters using clickable buttons after performing an initial VIN search.
 
 For more information on the API responses and available fields, refer to the [official API documentation](https://developer.manheim.com/#/apis/marketplace/valuations).
